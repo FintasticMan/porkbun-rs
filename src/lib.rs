@@ -1,8 +1,9 @@
-use std::collections::HashMap;
-use std::net::{AddrParseError, IpAddr, Ipv4Addr, Ipv6Addr};
+pub mod record;
 
 use serde::Deserialize;
 use serde_json::json;
+
+use record::{Content, Record, Type};
 
 #[derive(Deserialize)]
 pub struct Config {
@@ -11,74 +12,11 @@ pub struct Config {
     pub secretapikey: String,
 }
 
-#[derive(Deserialize)]
-struct ContentDeserializable {
-    #[serde(rename = "type")]
-    type_: String,
-    content: String,
-}
-
-#[derive(Debug)]
-pub enum Content {
-    A(Ipv4Addr),
-    Aaaa(Ipv6Addr),
-}
-
-impl Content {
-    pub fn type_as_str(&self) -> &'static str {
-        match self {
-            Content::A(_) => "A",
-            Content::Aaaa(_) => "AAAA",
-        }
-    }
-
-    pub fn addr_to_string(&self) -> String {
-        match self {
-            Content::A(addr) => addr.to_string(),
-            Content::Aaaa(addr) => addr.to_string(),
-        }
-    }
-}
-
-impl From<IpAddr> for Content {
-    fn from(value: IpAddr) -> Self {
-        match value {
-            IpAddr::V4(addr) => Content::A(addr),
-            IpAddr::V6(addr) => Content::Aaaa(addr),
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for Content {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        use serde::de::Error;
-
-        ContentDeserializable::deserialize(deserializer).and_then(|c| match c.type_.as_str() {
-            "A" => {
-                Ok(Content::A(c.content.parse().map_err(
-                    |e: AddrParseError| D::Error::custom(e.to_string()),
-                )?))
-            }
-            "AAAA" => {
-                Ok(Content::Aaaa(c.content.parse().map_err(
-                    |e: AddrParseError| D::Error::custom(e.to_string()),
-                )?))
-            }
-            _ => Err(D::Error::custom(format!(
-                "Invalid content type: {}",
-                c.type_
-            ))),
-        })
-    }
-}
-
 #[derive(Debug)]
 pub enum Error {
     Reqwest(reqwest::Error),
     ParseInt(std::num::ParseIntError),
+    Custom(String),
 }
 
 impl std::fmt::Display for Error {
@@ -86,6 +24,7 @@ impl std::fmt::Display for Error {
         let string = match self {
             Error::Reqwest(e) => e.to_string(),
             Error::ParseInt(e) => e.to_string(),
+            Error::Custom(s) => s.clone(),
         };
         write!(f, "{}", string)
     }
@@ -96,6 +35,7 @@ impl std::error::Error for Error {
         match self {
             Error::Reqwest(e) => Some(e),
             Error::ParseInt(e) => Some(e),
+            Error::Custom(_) => None,
         }
     }
 }
@@ -110,17 +50,6 @@ impl From<std::num::ParseIntError> for Error {
     fn from(value: std::num::ParseIntError) -> Self {
         Error::ParseInt(value)
     }
-}
-
-#[derive(Deserialize)]
-pub struct Record {
-    pub id: i64,
-    pub name: String,
-    #[serde(flatten)]
-    pub content: Content,
-    pub ttl: i64,
-    pub prio: i64,
-    pub notes: String,
 }
 
 pub struct Client {
@@ -139,10 +68,10 @@ impl Client {
     pub fn test_auth(&self) -> Result<String, Error> {
         let url = format!("{}/ping", self.config.endpoint);
 
-        let payload = HashMap::from([
-            ("secretapikey", self.config.secretapikey.as_str()),
-            ("apikey", self.config.apikey.as_str()),
-        ]);
+        let payload = json!({
+            "secretapikey": self.config.secretapikey.as_str(),
+            "apikey": self.config.apikey.as_str(),
+        });
 
         let resp = self.client.post(url).json(&payload).send()?;
 
@@ -164,12 +93,15 @@ impl Client {
             "apikey": self.config.apikey,
             "name": name.unwrap_or(""),
             "type": content.type_as_str(),
-            "content": content.addr_to_string(),
+            "content": content.value_to_string(),
         });
 
-        let resp = self.client.post(url).json(&payload).send()?;
-
-        resp.error_for_status_ref()?;
+        let resp = self
+            .client
+            .post(url)
+            .json(&payload)
+            .send()?
+            .error_for_status()?;
 
         #[derive(Deserialize)]
         struct Response {
@@ -193,12 +125,14 @@ impl Client {
             "apikey": self.config.apikey,
             "name": name.unwrap_or(""),
             "type": content.type_as_str(),
-            "content": content.addr_to_string(),
+            "content": content.value_to_string(),
         });
 
-        let resp = self.client.post(url).json(&payload).send()?;
-
-        resp.error_for_status()?;
+        self.client
+            .post(url)
+            .json(&payload)
+            .send()?
+            .error_for_status()?;
 
         Ok(())
     }
@@ -220,12 +154,14 @@ impl Client {
         let payload = json!({
             "secretapikey": self.config.secretapikey,
             "apikey": self.config.apikey,
-            "content": content.addr_to_string(),
+            "content": content.value_to_string(),
         });
 
-        let resp = self.client.post(url).json(&payload).send()?;
-
-        resp.error_for_status()?;
+        self.client
+            .post(url)
+            .json(&payload)
+            .send()?
+            .error_for_status()?;
 
         Ok(())
     }
@@ -238,10 +174,114 @@ impl Client {
             "apikey": self.config.apikey,
         });
 
-        let resp = self.client.post(url).json(&payload).send()?;
-
-        resp.error_for_status()?;
+        self.client
+            .post(url)
+            .json(&payload)
+            .send()?
+            .error_for_status()?;
 
         Ok(())
+    }
+
+    pub fn delete_dns_by_name_type(
+        &self,
+        domain: &str,
+        name: Option<&str>,
+        type_: Type,
+    ) -> Result<(), Error> {
+        let url = format!(
+            "{}/dns/deleteByNameType/{}/{}/{}",
+            self.config.endpoint,
+            domain,
+            type_.as_str(),
+            name.unwrap_or(""),
+        );
+
+        let payload = json!({
+            "secretapikey": self.config.secretapikey,
+            "apikey": self.config.apikey,
+        });
+
+        self.client
+            .post(url)
+            .json(&payload)
+            .send()?
+            .error_for_status()?;
+
+        Ok(())
+    }
+
+    pub fn retrieve_dns(&self, domain: &str, id: Option<i64>) -> Result<Vec<Record>, Error> {
+        let url = format!(
+            "{}/dns/retrieve/{}/{}",
+            self.config.endpoint,
+            domain,
+            id.map(|id| id.to_string()).unwrap_or("".to_string())
+        );
+
+        let payload = json!({
+            "secretapikey": self.config.secretapikey,
+            "apikey": self.config.apikey,
+        });
+
+        let resp = self
+            .client
+            .post(url)
+            .json(&payload)
+            .send()?
+            .error_for_status()?;
+
+        #[derive(Deserialize)]
+        struct Response {
+            records: Vec<Record>,
+        }
+
+        let resp = resp.json::<Response>()?;
+
+        if id.is_some() && resp.records.len() != 1 {
+            return Err(Error::Custom("Multiple records found".to_string()));
+        }
+
+        Ok(resp.records)
+    }
+
+    pub fn retrieve_dns_by_name_type(
+        &self,
+        domain: &str,
+        name: Option<&str>,
+        type_: Type,
+    ) -> Result<Vec<Record>, Error> {
+        let url = format!(
+            "{}/dns/retrieveByNameType/{}/{}/{}",
+            self.config.endpoint,
+            domain,
+            type_.as_str(),
+            name.unwrap_or(""),
+        );
+
+        let payload = json!({
+            "secretapikey": self.config.secretapikey,
+            "apikey": self.config.apikey,
+        });
+
+        let resp = self
+            .client
+            .post(url)
+            .json(&payload)
+            .send()?
+            .error_for_status()?;
+
+        #[derive(Deserialize)]
+        struct Response {
+            records: Vec<Record>,
+        }
+
+        let resp = resp.json::<Response>()?;
+
+        if resp.records.len() != 1 {
+            return Err(Error::Custom("Multiple records found".to_string()));
+        }
+
+        Ok(resp.records)
     }
 }

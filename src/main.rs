@@ -1,4 +1,4 @@
-use porkbun::{Client, Content};
+use porkbun::{record::Content, Client};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = config::Config::builder()
@@ -11,10 +11,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let client = Client::new(config);
 
-    println!(
-        "{}",
-        client.create_dns("riverhill.xyz", Some(""), Content::A("0.0.0.0".parse()?))?
-    );
+    dbg!(client.retrieve_dns("riverhill.xyz", None)?);
 
     Ok(())
 }
