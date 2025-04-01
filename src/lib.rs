@@ -251,7 +251,12 @@ impl Client {
             return Err(Error::Domain(DomainError::HasPrefix(domain.to_string())));
         }
 
-        let url = format!("{}/dns/delete/{}/{}", self.config.endpoint, root, id);
+        let url = self
+            .config
+            .endpoint
+            .join("dns/delete/")?
+            .join(&format!("{root}/"))?
+            .join(&id.to_string())?;
 
         let payload = json!({
             "secretapikey": self.config.secretapikey,
@@ -273,13 +278,13 @@ impl Client {
         type_: &Type,
     ) -> Result<(), Error> {
         let (prefix, root) = split_domain(&domain)?;
-        let url = format!(
-            "{}/dns/deleteByNameType/{}/{}/{}",
-            self.config.endpoint,
-            root,
-            type_.as_str(),
-            prefix.unwrap_or(""),
-        );
+        let url = self
+            .config
+            .endpoint
+            .join("dns/deleteByNameType/")?
+            .join(&format!("{root}/"))?
+            .join(&format!("{}/", type_.as_str()))?
+            .join(prefix.unwrap_or(""))?;
 
         let payload = json!({
             "secretapikey": self.config.secretapikey,
@@ -305,12 +310,12 @@ impl Client {
             return Err(Error::Domain(DomainError::HasPrefix(domain.to_string())));
         }
 
-        let url = format!(
-            "{}/dns/retrieve/{}/{}",
-            self.config.endpoint,
-            root,
-            id.map_or_else(|| "".to_string(), |id| id.to_string())
-        );
+        let url = self
+            .config
+            .endpoint
+            .join("dns/retrieve/")?
+            .join(&format!("{root}/"))?
+            .join(&id.map_or_else(|| "".to_string(), |id| id.to_string()))?;
 
         let payload = json!({
             "secretapikey": self.config.secretapikey,
@@ -340,13 +345,12 @@ impl Client {
         type_: &Type,
     ) -> Result<Vec<Record>, Error> {
         let (prefix, root) = split_domain(&domain)?;
-        let url = format!(
-            "{}/dns/retrieveByNameType/{}/{}/{}",
-            self.config.endpoint,
-            root,
-            type_.as_str(),
-            prefix.unwrap_or(""),
-        );
+        let url = self
+            .config
+            .endpoint
+            .join(&format!("{root}/"))?
+            .join(&format!("{}/", type_.as_str()))?
+            .join(prefix.unwrap_or(""))?;
 
         let payload = json!({
             "secretapikey": self.config.secretapikey,
