@@ -99,7 +99,9 @@ impl From<AddrParseError> for Error {
     }
 }
 
-fn split_domain<'a>(name: &'a domain::Name) -> Result<(Option<&'a str>, &'a str), Error> {
+pub(crate) fn split_domain<'a>(
+    name: &'a domain::Name,
+) -> Result<(Option<&'a str>, &'a str), Error> {
     let root = name
         .root()
         .ok_or_else(|| Error::Domain(DomainError::Invalid(name.to_string())))?;
@@ -160,7 +162,7 @@ impl Client {
     }
 
     pub fn create_dns(&self, domain: &domain::Name, content: &Content) -> Result<i64, Error> {
-        let (prefix, root) = split_domain(&domain)?;
+        let (prefix, root) = split_domain(domain)?;
         let url = self.config.endpoint.join("dns/create/")?.join(root)?;
 
         let mut payload = json!({
@@ -189,7 +191,7 @@ impl Client {
     }
 
     pub fn edit_dns(&self, domain: &domain::Name, id: i64, content: &Content) -> Result<(), Error> {
-        let (prefix, root) = split_domain(&domain)?;
+        let (prefix, root) = split_domain(domain)?;
         let url = self
             .config
             .endpoint
@@ -221,7 +223,7 @@ impl Client {
         domain: &domain::Name,
         content: &Content,
     ) -> Result<(), Error> {
-        let (prefix, root) = split_domain(&domain)?;
+        let (prefix, root) = split_domain(domain)?;
         let url = self
             .config
             .endpoint
@@ -246,7 +248,7 @@ impl Client {
     }
 
     pub fn delete_dns(&self, domain: &domain::Name, id: i64) -> Result<(), Error> {
-        let (prefix, root) = split_domain(&domain)?;
+        let (prefix, root) = split_domain(domain)?;
         if prefix.is_some() {
             return Err(Error::Domain(DomainError::HasPrefix(domain.to_string())));
         }
@@ -277,7 +279,7 @@ impl Client {
         domain: &domain::Name,
         type_: &Type,
     ) -> Result<(), Error> {
-        let (prefix, root) = split_domain(&domain)?;
+        let (prefix, root) = split_domain(domain)?;
         let url = self
             .config
             .endpoint
@@ -305,7 +307,7 @@ impl Client {
         domain: &domain::Name,
         id: Option<i64>,
     ) -> Result<Vec<Record>, Error> {
-        let (prefix, root) = split_domain(&domain)?;
+        let (prefix, root) = split_domain(domain)?;
         if prefix.is_some() {
             return Err(Error::Domain(DomainError::HasPrefix(domain.to_string())));
         }
@@ -344,7 +346,7 @@ impl Client {
         domain: &domain::Name,
         type_: &Type,
     ) -> Result<Vec<Record>, Error> {
-        let (prefix, root) = split_domain(&domain)?;
+        let (prefix, root) = split_domain(domain)?;
         let url = self
             .config
             .endpoint
