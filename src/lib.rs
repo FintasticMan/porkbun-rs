@@ -348,6 +348,7 @@ impl Client {
         let url = self
             .config
             .endpoint
+            .join("dns/retrieveByNameType/")?
             .join(&format!("{root}/"))?
             .join(&format!("{}/", type_.as_str()))?
             .join(prefix.unwrap_or(""))?;

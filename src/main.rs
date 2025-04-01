@@ -1,7 +1,7 @@
 use std::{
     cmp::Ordering,
     net::{Ipv4Addr, Ipv6Addr},
-    process::{Command, Stdio},
+    process::Command,
 };
 
 use addr::{domain, parse_domain_name};
@@ -50,42 +50,49 @@ struct Config {
     domains: Vec<DomainConfig>,
 }
 
-fn run_ip_command(device: &str, ip_version: &str) -> Result<Vec<u8>, Error> {
-    let ip_child = Command::new("ip")
-        .args([
-            ip_version, "-o", "address", "show", "scope", "global", "dev", device,
-        ])
-        .stdout(Stdio::piped())
-        .spawn()?;
-    let ip_out = ip_child
-        .stdout
-        .ok_or_else(|| Error::Custom("Failed to open ip stdout".to_string()))?;
-    let head_child = Command::new("head")
-        .args(["-n", "1"])
-        .stdin(Stdio::from(ip_out))
-        .stdout(Stdio::piped())
-        .spawn()?;
-    let head_out = head_child
-        .stdout
-        .ok_or_else(|| Error::Custom("Failed to open head stdout".to_string()))?;
-    let awk_child = Command::new("awk")
-        .arg("{printf \"%s\", $4}")
-        .stdin(Stdio::from(head_out))
-        .stdout(Stdio::piped())
-        .spawn()?;
-    let awk_out = awk_child
-        .stdout
-        .ok_or_else(|| Error::Custom("Failed to open awk stdout".to_string()))?;
-    Ok(Command::new("sed")
-        .args(["-E", "s/\\/.*?//"])
-        .stdin(Stdio::from(awk_out))
-        .output()?
-        .stdout)
+enum IpVersion {
+    Ipv4,
+    Ipv6,
+}
+
+fn run_ip_command(device: &str, ip_version: &IpVersion) -> Result<String, Error> {
+    let ip_version_arg = match ip_version {
+        IpVersion::Ipv4 => "-4",
+        IpVersion::Ipv6 => "-6",
+    };
+    let ip_output = Command::new("ip")
+        .arg(ip_version_arg)
+        .arg("-o")
+        .arg("address")
+        .arg("show")
+        .arg("scope")
+        .arg("global")
+        .arg("dev")
+        .arg(device)
+        .output()?;
+
+    let ip_output = String::from_utf8(ip_output.stdout)?;
+
+    let first_line = ip_output
+        .lines()
+        .next()
+        .ok_or_else(|| Error::Custom("Empty output from ip command".to_string()))?;
+
+    let ip_with_subnet = first_line
+        .split_whitespace()
+        .nth(3)
+        .ok_or_else(|| Error::Custom("Nothing found at expected position".to_string()))?;
+
+    let ip = ip_with_subnet
+        .split('/')
+        .next()
+        .ok_or_else(|| Error::Custom("Malformed IP with subnet".to_string()))?;
+    Ok(ip.to_string())
 }
 
 fn get_ipv4_private(device: &str) -> Result<Ipv4Addr, Error> {
-    let ip = String::from_utf8(run_ip_command(device, "-4")?)?;
-    Ok(ip.trim().parse()?)
+    let ip = run_ip_command(device, &IpVersion::Ipv4)?;
+    Ok(ip.parse()?)
 }
 
 fn get_ipv4_public(ip_oracle: Url) -> Result<Ipv4Addr, Error> {
@@ -97,8 +104,8 @@ fn get_ipv4_public(ip_oracle: Url) -> Result<Ipv4Addr, Error> {
 }
 
 fn get_ipv6(device: &str) -> Result<Ipv6Addr, Error> {
-    let ip = String::from_utf8(run_ip_command(device, "-6")?)?;
-    Ok(ip.trim().parse()?)
+    let ip = run_ip_command(device, &IpVersion::Ipv6)?;
+    Ok(ip.parse()?)
 }
 
 fn update_dns(client: &Client, domain: &domain::Name, content: &Content) -> Result<(), Error> {
