@@ -1,10 +1,10 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::str::FromStr;
 
 use serde::Deserialize;
-use strum_macros::{EnumString, IntoStaticStr};
+use strum_macros::IntoStaticStr;
 
-#[derive(Debug, EnumString, IntoStaticStr)]
+#[derive(Debug, Deserialize, PartialEq, Eq, IntoStaticStr)]
+#[serde(rename_all = "UPPERCASE")]
 #[strum(serialize_all = "UPPERCASE")]
 pub enum Type {
     A,
@@ -25,9 +25,26 @@ impl Type {
     pub fn as_str(&self) -> &'static str {
         self.into()
     }
+
+    pub fn from(value: &Content) -> Self {
+        match value {
+            Content::A(_) => Type::A,
+            Content::Mx(_) => Type::Mx,
+            Content::Cname(_) => Type::Cname,
+            Content::Alias(_) => Type::Alias,
+            Content::Txt(_) => Type::Txt,
+            Content::Ns(_) => Type::Ns,
+            Content::Aaaa(_) => Type::Aaaa,
+            Content::Srv(_) => Type::Srv,
+            Content::Tlsa(_) => Type::Tlsa,
+            Content::Caa(_) => Type::Caa,
+            Content::Https(_) => Type::Https,
+            Content::Svcb(_) => Type::Svcb,
+        }
+    }
 }
 
-#[derive(Debug, IntoStaticStr)]
+#[derive(Debug, PartialEq, Eq, IntoStaticStr)]
 #[strum(serialize_all = "UPPERCASE")]
 pub enum Content {
     A(Ipv4Addr),
@@ -65,6 +82,23 @@ impl Content {
             Content::Svcb(value) => value.clone(),
         }
     }
+
+    pub fn from(type_: &Type, content: &str) -> Result<Content, std::net::AddrParseError> {
+        Ok(match type_ {
+            Type::A => Content::A(content.parse()?),
+            Type::Mx => Content::Mx(content.to_string()),
+            Type::Cname => Content::Cname(content.to_string()),
+            Type::Alias => Content::Alias(content.to_string()),
+            Type::Txt => Content::Txt(content.to_string()),
+            Type::Ns => Content::Ns(content.to_string()),
+            Type::Aaaa => Content::Aaaa(content.parse()?),
+            Type::Srv => Content::Srv(content.to_string()),
+            Type::Tlsa => Content::Tlsa(content.to_string()),
+            Type::Caa => Content::Caa(content.to_string()),
+            Type::Https => Content::Https(content.to_string()),
+            Type::Svcb => Content::Svcb(content.to_string()),
+        })
+    }
 }
 
 impl From<IpAddr> for Content {
@@ -84,30 +118,14 @@ impl<'de> Deserialize<'de> for Content {
         use serde::de::Error;
 
         #[derive(Deserialize)]
-        struct ContentDeserializable {
+        struct ContentDeserializable<'a> {
             #[serde(rename = "type")]
-            type_: String,
-            content: String,
+            type_: Type,
+            content: &'a str,
         }
 
-        ContentDeserializable::deserialize(deserializer).and_then(|c| {
-            Ok(
-                match Type::from_str(c.type_.as_str()).map_err(Error::custom)? {
-                    Type::A => Content::A(c.content.parse().map_err(Error::custom)?),
-                    Type::Mx => Content::Mx(c.content),
-                    Type::Cname => Content::Cname(c.content),
-                    Type::Alias => Content::Alias(c.content),
-                    Type::Txt => Content::Txt(c.content),
-                    Type::Ns => Content::Ns(c.content),
-                    Type::Aaaa => Content::Aaaa(c.content.parse().map_err(Error::custom)?),
-                    Type::Srv => Content::Srv(c.content),
-                    Type::Tlsa => Content::Tlsa(c.content),
-                    Type::Caa => Content::Caa(c.content),
-                    Type::Https => Content::Https(c.content),
-                    Type::Svcb => Content::Svcb(c.content),
-                },
-            )
-        })
+        ContentDeserializable::deserialize(deserializer)
+            .and_then(|c| Content::from(&c.type_, c.content).map_err(Error::custom))
     }
 }
 

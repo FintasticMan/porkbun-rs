@@ -1,42 +1,83 @@
 pub mod record;
 
+use std::{
+    io,
+    net::{AddrParseError, IpAddr},
+    string::FromUtf8Error,
+};
+
+use addr::domain;
 use serde::Deserialize;
 use serde_json::json;
+use url::Url;
 
 use record::{Content, Record, Type};
 
-#[derive(Deserialize)]
-pub struct Config {
-    pub endpoint: String,
-    pub apikey: String,
-    pub secretapikey: String,
+#[derive(Debug)]
+pub enum DomainError {
+    Invalid(String),
+    HasPrefix(String),
 }
+
+impl std::fmt::Display for DomainError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DomainError::Invalid(d) => write!(f, "Invalid domain: {d}"),
+            DomainError::HasPrefix(d) => write!(f, "Domain has prefix: {d}"),
+        }
+    }
+}
+
+impl std::error::Error for DomainError {}
 
 #[derive(Debug)]
 pub enum Error {
+    Io(io::Error),
+    FromUtf8(FromUtf8Error),
     Reqwest(reqwest::Error),
-    ParseInt(std::num::ParseIntError),
+    Url(url::ParseError),
+    Domain(DomainError),
+    AddrParse(AddrParseError),
     Custom(String),
 }
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let string = match self {
-            Error::Reqwest(e) => e.to_string(),
-            Error::ParseInt(e) => e.to_string(),
-            Error::Custom(s) => s.clone(),
-        };
-        write!(f, "{}", string)
+        match self {
+            Error::Io(e) => write!(f, "{e}"),
+            Error::FromUtf8(e) => write!(f, "{e}"),
+            Error::Reqwest(e) => write!(f, "{e}"),
+            Error::Url(e) => write!(f, "{e}"),
+            Error::Domain(e) => write!(f, "{e}"),
+            Error::AddrParse(e) => write!(f, "{e}"),
+            Error::Custom(s) => write!(f, "{s}"),
+        }
     }
 }
 
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Error::Io(e) => Some(e),
+            Error::FromUtf8(e) => Some(e),
             Error::Reqwest(e) => Some(e),
-            Error::ParseInt(e) => Some(e),
+            Error::Url(e) => Some(e),
+            Error::Domain(e) => Some(e),
+            Error::AddrParse(e) => Some(e),
             Error::Custom(_) => None,
         }
+    }
+}
+
+impl From<io::Error> for Error {
+    fn from(value: io::Error) -> Self {
+        Error::Io(value)
+    }
+}
+
+impl From<FromUtf8Error> for Error {
+    fn from(value: FromUtf8Error) -> Self {
+        Error::FromUtf8(value)
     }
 }
 
@@ -46,10 +87,39 @@ impl From<reqwest::Error> for Error {
     }
 }
 
-impl From<std::num::ParseIntError> for Error {
-    fn from(value: std::num::ParseIntError) -> Self {
-        Error::ParseInt(value)
+impl From<url::ParseError> for Error {
+    fn from(value: url::ParseError) -> Self {
+        Error::Url(value)
     }
+}
+
+impl From<AddrParseError> for Error {
+    fn from(value: AddrParseError) -> Self {
+        Error::AddrParse(value)
+    }
+}
+
+fn split_domain<'a>(name: &'a domain::Name) -> Result<(Option<&'a str>, &'a str), Error> {
+    let root = name
+        .root()
+        .ok_or_else(|| Error::Domain(DomainError::Invalid(name.to_string())))?;
+    let prefix = name.prefix();
+
+    Ok((prefix, root))
+}
+
+#[derive(Deserialize)]
+pub struct Config {
+    #[serde(default = "default_endpoint")]
+    pub endpoint: Url,
+    pub apikey: String,
+    pub secretapikey: String,
+}
+
+fn default_endpoint() -> Url {
+    "https://api.porkbun.com/api/json/v3/"
+        .parse()
+        .expect("Unable to parse the default endpoint")
 }
 
 pub struct Client {
@@ -65,36 +135,43 @@ impl Client {
         }
     }
 
-    pub fn test_auth(&self) -> Result<String, Error> {
-        let url = format!("{}/ping", self.config.endpoint);
+    pub fn test_auth(&self) -> Result<IpAddr, Error> {
+        let url = self.config.endpoint.join("ping")?;
 
         let payload = json!({
             "secretapikey": self.config.secretapikey.as_str(),
             "apikey": self.config.apikey.as_str(),
         });
 
-        let resp = self.client.post(url).json(&payload).send()?;
+        let resp = self
+            .client
+            .post(url)
+            .json(&payload)
+            .send()?
+            .error_for_status()?;
 
-        resp.error_for_status_ref()?;
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Response {
+            your_ip: IpAddr,
+        }
 
-        Ok(resp.text()?)
+        Ok(resp.json::<Response>()?.your_ip)
     }
 
-    pub fn create_dns(
-        &self,
-        domain: &str,
-        name: Option<&str>,
-        content: Content,
-    ) -> Result<i64, Error> {
-        let url = format!("{}/dns/create/{}", self.config.endpoint, domain);
+    pub fn create_dns(&self, domain: &domain::Name, content: &Content) -> Result<i64, Error> {
+        let (prefix, root) = split_domain(&domain)?;
+        let url = self.config.endpoint.join("dns/create/")?.join(root)?;
 
-        let payload = json!({
+        let mut payload = json!({
             "secretapikey": self.config.secretapikey,
             "apikey": self.config.apikey,
-            "name": name.unwrap_or(""),
             "type": content.type_as_str(),
             "content": content.value_to_string(),
         });
+        if let Some(prefix) = prefix {
+            payload["name"] = serde_json::Value::from(prefix);
+        }
 
         let resp = self
             .client
@@ -111,22 +188,24 @@ impl Client {
         Ok(resp.json::<Response>()?.id)
     }
 
-    pub fn edit_dns(
-        &self,
-        domain: &str,
-        id: i64,
-        name: Option<&str>,
-        content: Content,
-    ) -> Result<(), Error> {
-        let url = format!("{}/dns/edit/{}/{}", self.config.endpoint, domain, id);
+    pub fn edit_dns(&self, domain: &domain::Name, id: i64, content: &Content) -> Result<(), Error> {
+        let (prefix, root) = split_domain(&domain)?;
+        let url = self
+            .config
+            .endpoint
+            .join("dns/edit/")?
+            .join(&format!("{root}/"))?
+            .join(&id.to_string())?;
 
-        let payload = json!({
+        let mut payload = json!({
             "secretapikey": self.config.secretapikey,
             "apikey": self.config.apikey,
-            "name": name.unwrap_or(""),
             "type": content.type_as_str(),
             "content": content.value_to_string(),
         });
+        if let Some(prefix) = prefix {
+            payload["name"] = serde_json::Value::from(prefix);
+        }
 
         self.client
             .post(url)
@@ -139,17 +218,17 @@ impl Client {
 
     pub fn edit_dns_by_name_type(
         &self,
-        domain: &str,
-        name: Option<&str>,
-        content: Content,
+        domain: &domain::Name,
+        content: &Content,
     ) -> Result<(), Error> {
-        let url = format!(
-            "{}/dns/editByNameType/{}/{}/{}",
-            self.config.endpoint,
-            domain,
-            content.type_as_str(),
-            name.unwrap_or("")
-        );
+        let (prefix, root) = split_domain(&domain)?;
+        let url = self
+            .config
+            .endpoint
+            .join("dns/editByNameType/")?
+            .join(&format!("{root}/"))?
+            .join(&format!("{}/", content.type_as_str()))?
+            .join(prefix.unwrap_or(""))?;
 
         let payload = json!({
             "secretapikey": self.config.secretapikey,
@@ -166,8 +245,13 @@ impl Client {
         Ok(())
     }
 
-    pub fn delete_dns(&self, domain: &str, id: i64) -> Result<(), Error> {
-        let url = format!("{}/dns/delete/{}/{}", self.config.endpoint, domain, id);
+    pub fn delete_dns(&self, domain: &domain::Name, id: i64) -> Result<(), Error> {
+        let (prefix, root) = split_domain(&domain)?;
+        if prefix.is_some() {
+            return Err(Error::Domain(DomainError::HasPrefix(domain.to_string())));
+        }
+
+        let url = format!("{}/dns/delete/{}/{}", self.config.endpoint, root, id);
 
         let payload = json!({
             "secretapikey": self.config.secretapikey,
@@ -185,16 +269,16 @@ impl Client {
 
     pub fn delete_dns_by_name_type(
         &self,
-        domain: &str,
-        name: Option<&str>,
-        type_: Type,
+        domain: &domain::Name,
+        type_: &Type,
     ) -> Result<(), Error> {
+        let (prefix, root) = split_domain(&domain)?;
         let url = format!(
             "{}/dns/deleteByNameType/{}/{}/{}",
             self.config.endpoint,
-            domain,
+            root,
             type_.as_str(),
-            name.unwrap_or(""),
+            prefix.unwrap_or(""),
         );
 
         let payload = json!({
@@ -211,12 +295,21 @@ impl Client {
         Ok(())
     }
 
-    pub fn retrieve_dns(&self, domain: &str, id: Option<i64>) -> Result<Vec<Record>, Error> {
+    pub fn retrieve_dns(
+        &self,
+        domain: &domain::Name,
+        id: Option<i64>,
+    ) -> Result<Vec<Record>, Error> {
+        let (prefix, root) = split_domain(&domain)?;
+        if prefix.is_some() {
+            return Err(Error::Domain(DomainError::HasPrefix(domain.to_string())));
+        }
+
         let url = format!(
             "{}/dns/retrieve/{}/{}",
             self.config.endpoint,
-            domain,
-            id.map(|id| id.to_string()).unwrap_or("".to_string())
+            root,
+            id.map_or_else(|| "".to_string(), |id| id.to_string())
         );
 
         let payload = json!({
@@ -237,26 +330,22 @@ impl Client {
         }
 
         let resp = resp.json::<Response>()?;
-
-        if id.is_some() && resp.records.len() != 1 {
-            return Err(Error::Custom("Multiple records found".to_string()));
-        }
 
         Ok(resp.records)
     }
 
     pub fn retrieve_dns_by_name_type(
         &self,
-        domain: &str,
-        name: Option<&str>,
-        type_: Type,
+        domain: &domain::Name,
+        type_: &Type,
     ) -> Result<Vec<Record>, Error> {
+        let (prefix, root) = split_domain(&domain)?;
         let url = format!(
             "{}/dns/retrieveByNameType/{}/{}/{}",
             self.config.endpoint,
-            domain,
+            root,
             type_.as_str(),
-            name.unwrap_or(""),
+            prefix.unwrap_or(""),
         );
 
         let payload = json!({
@@ -277,10 +366,6 @@ impl Client {
         }
 
         let resp = resp.json::<Response>()?;
-
-        if resp.records.len() != 1 {
-            return Err(Error::Custom("Multiple records found".to_string()));
-        }
 
         Ok(resp.records)
     }
