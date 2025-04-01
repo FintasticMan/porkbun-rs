@@ -1,148 +1,116 @@
 pub mod record;
 
-use std::{
-    io,
-    net::{AddrParseError, IpAddr},
-    string::FromUtf8Error,
-};
+use std::net::IpAddr;
 
 use addr::domain;
 use serde::Deserialize;
 use serde_json::json;
+use thiserror::Error as ThisError;
 use url::Url;
 
 use record::{Content, Record, Type};
 
-#[derive(Debug)]
+#[derive(ThisError, Debug)]
 pub enum DomainError {
-    Invalid(String),
+    #[error("domain {0:?} has a prefix")]
     HasPrefix(String),
+    #[error("domain {0:?} doesn't have a root")]
+    MissingRoot(String),
 }
 
-impl std::fmt::Display for DomainError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            DomainError::Invalid(d) => write!(f, "Invalid domain: {d}"),
-            DomainError::HasPrefix(d) => write!(f, "Domain has prefix: {d}"),
+#[derive(ThisError, Debug)]
+pub enum ApiError {
+    #[error(transparent)]
+    Domain(#[from] DomainError),
+    #[error(transparent)]
+    Reqwest(#[from] reqwest::Error),
+    #[error(transparent)]
+    UrlParse(#[from] url::ParseError),
+}
+
+#[derive(ThisError, Debug)]
+pub enum ClientBuilderError {
+    #[error("missing field: {0}")]
+    MissingField(String),
+    #[error(transparent)]
+    UrlParse(#[from] url::ParseError),
+}
+
+pub struct ClientBuilder {
+    endpoint: Option<Url>,
+    apikey: Option<String>,
+    secretapikey: Option<String>,
+}
+
+impl ClientBuilder {
+    pub fn new() -> Self {
+        Self {
+            endpoint: None,
+            apikey: None,
+            secretapikey: None,
         }
     }
-}
 
-impl std::error::Error for DomainError {}
+    pub fn endpoint(mut self, endpoint: &Url) -> Self {
+        self.endpoint = Some(endpoint.clone());
+        self
+    }
 
-#[derive(Debug)]
-pub enum Error {
-    Io(io::Error),
-    FromUtf8(FromUtf8Error),
-    Reqwest(reqwest::Error),
-    Url(url::ParseError),
-    Domain(DomainError),
-    AddrParse(AddrParseError),
-    Custom(String),
-}
-
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Error::Io(e) => write!(f, "{e}"),
-            Error::FromUtf8(e) => write!(f, "{e}"),
-            Error::Reqwest(e) => write!(f, "{e}"),
-            Error::Url(e) => write!(f, "{e}"),
-            Error::Domain(e) => write!(f, "{e}"),
-            Error::AddrParse(e) => write!(f, "{e}"),
-            Error::Custom(s) => write!(f, "{s}"),
+    pub fn endpoint_if_some(mut self, endpoint: Option<&Url>) -> Self {
+        if let Some(endpoint) = endpoint {
+            self.endpoint = Some(endpoint.clone());
         }
+        self
     }
-}
-
-impl std::error::Error for Error {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Error::Io(e) => Some(e),
-            Error::FromUtf8(e) => Some(e),
-            Error::Reqwest(e) => Some(e),
-            Error::Url(e) => Some(e),
-            Error::Domain(e) => Some(e),
-            Error::AddrParse(e) => Some(e),
-            Error::Custom(_) => None,
-        }
+    pub fn apikey(mut self, apikey: &str) -> Self {
+        self.apikey = Some(apikey.to_string());
+        self
     }
-}
 
-impl From<io::Error> for Error {
-    fn from(value: io::Error) -> Self {
-        Error::Io(value)
+    pub fn secretapikey(mut self, secretapikey: &str) -> Self {
+        self.secretapikey = Some(secretapikey.to_string());
+        self
     }
-}
 
-impl From<FromUtf8Error> for Error {
-    fn from(value: FromUtf8Error) -> Self {
-        Error::FromUtf8(value)
+    pub fn build(self) -> Result<Client, ClientBuilderError> {
+        let endpoint = match self.endpoint {
+            Some(endpoint) => endpoint,
+            None => "https://api.porkbun.com/api/json/v3/".parse()?,
+        };
+        let apikey = self
+            .apikey
+            .ok_or_else(|| ClientBuilderError::MissingField("apikey".to_string()))?;
+        let secretapikey = self
+            .secretapikey
+            .ok_or_else(|| ClientBuilderError::MissingField("secretapikey".to_string()))?;
+
+        Ok(Client {
+            endpoint,
+            apikey,
+            secretapikey,
+            client: reqwest::blocking::Client::new(),
+        })
     }
-}
-
-impl From<reqwest::Error> for Error {
-    fn from(value: reqwest::Error) -> Self {
-        Error::Reqwest(value)
-    }
-}
-
-impl From<url::ParseError> for Error {
-    fn from(value: url::ParseError) -> Self {
-        Error::Url(value)
-    }
-}
-
-impl From<AddrParseError> for Error {
-    fn from(value: AddrParseError) -> Self {
-        Error::AddrParse(value)
-    }
-}
-
-pub(crate) fn split_domain<'a>(
-    name: &'a domain::Name,
-) -> Result<(Option<&'a str>, &'a str), Error> {
-    let root = name
-        .root()
-        .ok_or_else(|| Error::Domain(DomainError::Invalid(name.to_string())))?;
-    let prefix = name.prefix();
-
-    Ok((prefix, root))
-}
-
-#[derive(Deserialize)]
-pub struct Config {
-    #[serde(default = "default_endpoint")]
-    pub endpoint: Url,
-    pub apikey: String,
-    pub secretapikey: String,
-}
-
-fn default_endpoint() -> Url {
-    "https://api.porkbun.com/api/json/v3/"
-        .parse()
-        .expect("Unable to parse the default endpoint")
 }
 
 pub struct Client {
-    config: Config,
+    endpoint: Url,
+    apikey: String,
+    secretapikey: String,
     client: reqwest::blocking::Client,
 }
 
 impl Client {
-    pub fn new(config: Config) -> Self {
-        Self {
-            config,
-            client: reqwest::blocking::Client::new(),
-        }
+    pub fn builder() -> ClientBuilder {
+        ClientBuilder::new()
     }
 
-    pub fn test_auth(&self) -> Result<IpAddr, Error> {
-        let url = self.config.endpoint.join("ping")?;
+    pub fn test_auth(&self) -> Result<IpAddr, ApiError> {
+        let url = self.endpoint.join("ping")?;
 
         let payload = json!({
-            "secretapikey": self.config.secretapikey.as_str(),
-            "apikey": self.config.apikey.as_str(),
+            "secretapikey": self.secretapikey.as_str(),
+            "apikey": self.apikey.as_str(),
         });
 
         let resp = self
@@ -161,13 +129,13 @@ impl Client {
         Ok(resp.json::<Response>()?.your_ip)
     }
 
-    pub fn create_dns(&self, domain: &domain::Name, content: &Content) -> Result<i64, Error> {
+    pub fn create_dns(&self, domain: &domain::Name, content: &Content) -> Result<i64, ApiError> {
         let (prefix, root) = split_domain(domain)?;
-        let url = self.config.endpoint.join("dns/create/")?.join(root)?;
+        let url = self.endpoint.join("dns/create/")?.join(root)?;
 
         let mut payload = json!({
-            "secretapikey": self.config.secretapikey,
-            "apikey": self.config.apikey,
+            "secretapikey": self.secretapikey,
+            "apikey": self.apikey,
             "type": content.type_as_str(),
             "content": content.value_to_string(),
         });
@@ -190,18 +158,22 @@ impl Client {
         Ok(resp.json::<Response>()?.id)
     }
 
-    pub fn edit_dns(&self, domain: &domain::Name, id: i64, content: &Content) -> Result<(), Error> {
+    pub fn edit_dns(
+        &self,
+        domain: &domain::Name,
+        id: i64,
+        content: &Content,
+    ) -> Result<(), ApiError> {
         let (prefix, root) = split_domain(domain)?;
         let url = self
-            .config
             .endpoint
             .join("dns/edit/")?
             .join(&format!("{root}/"))?
             .join(&id.to_string())?;
 
         let mut payload = json!({
-            "secretapikey": self.config.secretapikey,
-            "apikey": self.config.apikey,
+            "secretapikey": self.secretapikey,
+            "apikey": self.apikey,
             "type": content.type_as_str(),
             "content": content.value_to_string(),
         });
@@ -222,10 +194,9 @@ impl Client {
         &self,
         domain: &domain::Name,
         content: &Content,
-    ) -> Result<(), Error> {
+    ) -> Result<(), ApiError> {
         let (prefix, root) = split_domain(domain)?;
         let url = self
-            .config
             .endpoint
             .join("dns/editByNameType/")?
             .join(&format!("{root}/"))?
@@ -233,8 +204,8 @@ impl Client {
             .join(prefix.unwrap_or(""))?;
 
         let payload = json!({
-            "secretapikey": self.config.secretapikey,
-            "apikey": self.config.apikey,
+            "secretapikey": self.secretapikey,
+            "apikey": self.apikey,
             "content": content.value_to_string(),
         });
 
@@ -247,22 +218,21 @@ impl Client {
         Ok(())
     }
 
-    pub fn delete_dns(&self, domain: &domain::Name, id: i64) -> Result<(), Error> {
+    pub fn delete_dns(&self, domain: &domain::Name, id: i64) -> Result<(), ApiError> {
         let (prefix, root) = split_domain(domain)?;
         if prefix.is_some() {
-            return Err(Error::Domain(DomainError::HasPrefix(domain.to_string())));
+            return Err(ApiError::Domain(DomainError::HasPrefix(domain.to_string())));
         }
 
         let url = self
-            .config
             .endpoint
             .join("dns/delete/")?
             .join(&format!("{root}/"))?
             .join(&id.to_string())?;
 
         let payload = json!({
-            "secretapikey": self.config.secretapikey,
-            "apikey": self.config.apikey,
+            "secretapikey": self.secretapikey,
+            "apikey": self.apikey,
         });
 
         self.client
@@ -278,10 +248,9 @@ impl Client {
         &self,
         domain: &domain::Name,
         type_: &Type,
-    ) -> Result<(), Error> {
+    ) -> Result<(), ApiError> {
         let (prefix, root) = split_domain(domain)?;
         let url = self
-            .config
             .endpoint
             .join("dns/deleteByNameType/")?
             .join(&format!("{root}/"))?
@@ -289,8 +258,8 @@ impl Client {
             .join(prefix.unwrap_or(""))?;
 
         let payload = json!({
-            "secretapikey": self.config.secretapikey,
-            "apikey": self.config.apikey,
+            "secretapikey": self.secretapikey,
+            "apikey": self.apikey,
         });
 
         self.client
@@ -306,22 +275,21 @@ impl Client {
         &self,
         domain: &domain::Name,
         id: Option<i64>,
-    ) -> Result<Vec<Record>, Error> {
+    ) -> Result<Vec<Record>, ApiError> {
         let (prefix, root) = split_domain(domain)?;
         if prefix.is_some() {
-            return Err(Error::Domain(DomainError::HasPrefix(domain.to_string())));
+            return Err(ApiError::Domain(DomainError::HasPrefix(domain.to_string())));
         }
 
         let url = self
-            .config
             .endpoint
             .join("dns/retrieve/")?
             .join(&format!("{root}/"))?
             .join(&id.map_or_else(|| "".to_string(), |id| id.to_string()))?;
 
         let payload = json!({
-            "secretapikey": self.config.secretapikey,
-            "apikey": self.config.apikey,
+            "secretapikey": self.secretapikey,
+            "apikey": self.apikey,
         });
 
         let resp = self
@@ -345,10 +313,9 @@ impl Client {
         &self,
         domain: &domain::Name,
         type_: &Type,
-    ) -> Result<Vec<Record>, Error> {
+    ) -> Result<Vec<Record>, ApiError> {
         let (prefix, root) = split_domain(domain)?;
         let url = self
-            .config
             .endpoint
             .join("dns/retrieveByNameType/")?
             .join(&format!("{root}/"))?
@@ -356,8 +323,8 @@ impl Client {
             .join(prefix.unwrap_or(""))?;
 
         let payload = json!({
-            "secretapikey": self.config.secretapikey,
-            "apikey": self.config.apikey,
+            "secretapikey": self.secretapikey,
+            "apikey": self.apikey,
         });
 
         let resp = self
@@ -376,4 +343,13 @@ impl Client {
 
         Ok(resp.records)
     }
+}
+
+fn split_domain<'a>(name: &'a domain::Name) -> Result<(Option<&'a str>, &'a str), DomainError> {
+    let root = name
+        .root()
+        .ok_or_else(|| DomainError::MissingRoot(name.to_string()))?;
+    let prefix = name.prefix();
+
+    Ok((prefix, root))
 }

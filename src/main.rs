@@ -5,17 +5,38 @@ use std::{
 };
 
 use addr::{domain, parse_domain_name};
+use anyhow::{anyhow, bail, Result};
 use config::FileFormat;
 use directories::ProjectDirs;
 use itertools::Itertools;
 use log::{debug, info, warn, LevelFilter};
 use serde::Deserialize;
+use url::Url;
 
 use hamsando::{
     record::{Content, Type},
-    Client, Error,
+    Client,
 };
-use url::Url;
+
+#[derive(Deserialize)]
+struct ApiConfig {
+    endpoint: Option<Url>,
+    apikey: String,
+    secretapikey: String,
+}
+
+#[derive(Deserialize)]
+struct IpConfig {
+    device: String,
+    #[serde(default = "default_ip_oracle")]
+    ip_oracle: Url,
+}
+
+fn default_ip_oracle() -> Url {
+    "https://api.ipify.org/"
+        .parse()
+        .expect("unable to parse the default IP oracle")
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -33,21 +54,8 @@ struct DomainConfig {
 }
 
 #[derive(Deserialize)]
-struct IpConfig {
-    device: String,
-    #[serde(default = "default_ip_oracle")]
-    ip_oracle: Url,
-}
-
-fn default_ip_oracle() -> Url {
-    "https://api.ipify.org/"
-        .parse()
-        .expect("Unable to parse the default IP oracle")
-}
-
-#[derive(Deserialize)]
 struct Config {
-    api: hamsando::Config,
+    api: ApiConfig,
     ip: IpConfig,
     domains: Vec<DomainConfig>,
 }
@@ -57,7 +65,7 @@ enum IpVersion {
     Ipv6,
 }
 
-fn run_ip_command(device: &str, ip_version: &IpVersion) -> Result<String, Error> {
+fn run_ip_command(device: &str, ip_version: &IpVersion) -> Result<String> {
     let ip_version_arg = match ip_version {
         IpVersion::Ipv4 => "-4",
         IpVersion::Ipv6 => "-6",
@@ -78,26 +86,26 @@ fn run_ip_command(device: &str, ip_version: &IpVersion) -> Result<String, Error>
     let first_line = ip_output
         .lines()
         .next()
-        .ok_or_else(|| Error::Custom("Empty output from ip command".to_string()))?;
+        .ok_or_else(|| anyhow!("empty output from ip command"))?;
 
     let ip_with_subnet = first_line
         .split_whitespace()
         .nth(3)
-        .ok_or_else(|| Error::Custom("Nothing found at expected position".to_string()))?;
+        .ok_or_else(|| anyhow!("nothing found at expected position"))?;
 
     let ip = ip_with_subnet
         .split('/')
         .next()
-        .ok_or_else(|| Error::Custom("Malformed IP with subnet".to_string()))?;
+        .ok_or_else(|| anyhow!("malformed IP with subnet: {ip_with_subnet:?}"))?;
     Ok(ip.to_string())
 }
 
-fn get_ipv4_private(device: &str) -> Result<Ipv4Addr, Error> {
+fn get_ipv4_private(device: &str) -> Result<Ipv4Addr> {
     let ip = run_ip_command(device, &IpVersion::Ipv4)?;
     Ok(ip.parse()?)
 }
 
-fn get_ipv4_public(ip_oracle: Url) -> Result<Ipv4Addr, Error> {
+fn get_ipv4_public(ip_oracle: Url) -> Result<Ipv4Addr> {
     Ok(reqwest::blocking::get(ip_oracle)?
         .error_for_status()?
         .text()?
@@ -105,39 +113,37 @@ fn get_ipv4_public(ip_oracle: Url) -> Result<Ipv4Addr, Error> {
         .parse()?)
 }
 
-fn get_ipv6(device: &str) -> Result<Ipv6Addr, Error> {
+fn get_ipv6(device: &str) -> Result<Ipv6Addr> {
     let ip = run_ip_command(device, &IpVersion::Ipv6)?;
     Ok(ip.parse()?)
 }
 
-fn update_dns(client: &Client, domain: &domain::Name, content: &Content) -> Result<(), Error> {
+fn update_dns(client: &Client, domain: &domain::Name, content: &Content) -> Result<()> {
     let dns = client.retrieve_dns_by_name_type(domain, &Type::from(content))?;
-    match dns.len().cmp(&1) {
-        Ordering::Less => client.create_dns(domain, content).map(|_| ()),
+    Ok(match dns.len().cmp(&1) {
+        Ordering::Less => client.create_dns(domain, content).map(|_| ())?,
         Ordering::Equal => {
             if dns[0].content == *content {
                 return Ok(());
             }
-            client.edit_dns(domain, dns[0].id, content)
+            client.edit_dns(domain, dns[0].id, content)?
         }
-        Ordering::Greater => Err(Error::Custom(format!(
-            "Multiple DNS records for domain {domain}"
-        ))),
-    }
+        Ordering::Greater => bail!("multiple DNS records for domain {domain}"),
+    })
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<()> {
     env_logger::builder()
         .filter_level(LevelFilter::max())
         .parse_default_env()
         .init();
 
     let project_dirs = ProjectDirs::from("", "", "hamsando")
-        .ok_or_else(|| Error::Custom("Unable to find config directory".to_string()))?;
+        .ok_or_else(|| anyhow!("unable to find home directory"))?;
     let config_file = project_dirs.config_dir().join("config.toml");
 
     debug!(
-        "Loading configuration from {} and environment",
+        "loading configuration from {:?} and environment",
         config_file.display()
     );
 
@@ -145,7 +151,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_source(config::File::new(
             config_file
                 .to_str()
-                .ok_or_else(|| Error::Custom("Config file path is not valid UTF-8".to_string()))?,
+                .ok_or_else(|| anyhow!("config file path is not valid UTF-8"))?,
             FileFormat::Toml,
         ))
         .add_source(config::Environment::with_prefix("HAMSANDO"))
@@ -153,10 +159,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config: Config = config.try_deserialize()?;
 
-    let client = Client::new(config.api);
+    let client = Client::builder()
+        .apikey(&config.api.apikey)
+        .secretapikey(&config.api.secretapikey)
+        .endpoint_if_some(config.api.endpoint.as_ref())
+        .build()?;
     client.test_auth()?;
 
-    info!("Successfully authenticated");
+    info!("successfully authenticated");
 
     let ipv4_private = get_ipv4_private(&config.ip.device);
     let ipv4_public = get_ipv4_public(config.ip.ip_oracle);
@@ -166,7 +176,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let name = match parse_domain_name(&domain.name) {
             Ok(name) => name,
             Err(e) => {
-                warn!("Parsing domain name failed: {e}");
+                warn!("parsing domain name failed: {e}");
                 continue;
             }
         };
@@ -174,36 +184,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(scope) = &domain.ipv4 {
             let ipv4 = match scope {
                 Ipv4Scope::Private => {
-                    info!("Updating IPv4 to private IP for domain {name}");
+                    info!("updating IPv4 to private IP for domain {name}");
                     &ipv4_private
                 }
                 Ipv4Scope::Public => {
-                    info!("Updating IPv4 to public IP for domain {name}");
+                    info!("updating IPv4 to public IP for domain {name}");
                     &ipv4_public
                 }
             };
             match ipv4 {
                 Ok(ipv4) => {
                     if let Err(e) = update_dns(&client, &name, &Content::A(*ipv4)) {
-                        warn!("Updating A record for {name} failed: {e}");
+                        warn!("updating A record for {name} failed: {e}");
                     };
                 }
                 Err(e) => {
-                    warn!("Unable to get IPv4: {e}");
+                    warn!("unable to get IPv4: {e}");
                 }
             };
         }
 
         if domain.ipv6 {
-            info!("Updating IPv6 for domain {name}");
+            info!("updating IPv6 for domain {name}");
             match &ipv6 {
                 Ok(ipv6) => {
                     if let Err(e) = update_dns(&client, &name, &Content::Aaaa(*ipv6)) {
-                        warn!("Updating AAAA record for {name} failed: {e}");
+                        warn!("updating AAAA record for {name} failed: {e}");
                     }
                 }
                 Err(e) => {
-                    warn!("Unable to get IPv6: {e}");
+                    warn!("unable to get IPv6: {e}");
                 }
             };
         }

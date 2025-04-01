@@ -143,5 +143,5 @@ where
     D: serde::Deserializer<'de>,
 {
     let s: String = Deserialize::deserialize(deserializer)?;
-    s.parse::<i64>().map_err(serde::de::Error::custom)
+    s.parse().map_err(serde::de::Error::custom)
 }
