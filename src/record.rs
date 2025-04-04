@@ -118,30 +118,61 @@ impl<'de> Deserialize<'de> for Content {
         use serde::de::Error;
 
         #[derive(Deserialize)]
-        struct ContentDeserializable<'a> {
+        struct ContentDeserializable {
             #[serde(rename = "type")]
             type_: Type,
-            content: &'a str,
+            content: String,
         }
 
         ContentDeserializable::deserialize(deserializer)
-            .and_then(|c| Content::from(&c.type_, c.content).map_err(Error::custom))
+            .and_then(|c| Content::from(&c.type_, &c.content).map_err(D::Error::custom))
     }
 }
 
 #[derive(Debug, Deserialize)]
 pub struct Record {
-    #[serde(deserialize_with = "deserialize_string_to_i64")]
+    #[serde(deserialize_with = "deserialize_to_i64")]
     pub id: i64,
     pub name: String,
     #[serde(flatten)]
     pub content: Content,
+    #[serde(deserialize_with = "deserialize_to_i64")]
+    pub ttl: i64,
+    #[serde(deserialize_with = "deserialize_to_option_i64")]
+    pub prio: Option<i64>,
+    pub notes: Option<String>,
 }
 
-fn deserialize_string_to_i64<'de, D>(deserializer: D) -> Result<i64, D::Error>
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StringOrI64 {
+    I64(i64),
+    String(String),
+}
+
+pub(crate) fn deserialize_to_i64<'de, D>(deserializer: D) -> Result<i64, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let s: String = Deserialize::deserialize(deserializer)?;
-    s.parse().map_err(serde::de::Error::custom)
+    use serde::de::Error;
+
+    let string_or_i64 = StringOrI64::deserialize(deserializer)?;
+    Ok(match string_or_i64 {
+        StringOrI64::I64(i) => i,
+        StringOrI64::String(s) => s.parse().map_err(D::Error::custom)?,
+    })
+}
+
+pub(crate) fn deserialize_to_option_i64<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+
+    let string_or_i64 = Option::<StringOrI64>::deserialize(deserializer)?;
+    Ok(match string_or_i64 {
+        Some(StringOrI64::I64(i)) => Some(i),
+        Some(StringOrI64::String(s)) => Some(s.parse().map_err(D::Error::custom)?),
+        None => None,
+    })
 }

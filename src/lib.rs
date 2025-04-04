@@ -129,7 +129,13 @@ impl Client {
         Ok(resp.json::<Response>()?.your_ip)
     }
 
-    pub fn create_dns(&self, domain: &domain::Name, content: &Content) -> Result<i64, ApiError> {
+    pub fn create_dns(
+        &self,
+        domain: &domain::Name,
+        content: &Content,
+        ttl: Option<i64>,
+        prio: Option<i64>,
+    ) -> Result<i64, ApiError> {
         let (prefix, root) = split_domain(domain)?;
         let url = self.endpoint.join("dns/create/")?.join(root)?;
 
@@ -142,6 +148,12 @@ impl Client {
         if let Some(prefix) = prefix {
             payload["name"] = serde_json::Value::from(prefix);
         }
+        if let Some(ttl) = ttl {
+            payload["ttl"] = serde_json::Value::from(ttl);
+        }
+        if let Some(prio) = prio {
+            payload["prio"] = serde_json::Value::from(prio);
+        }
 
         let resp = self
             .client
@@ -152,6 +164,7 @@ impl Client {
 
         #[derive(Deserialize)]
         struct Response {
+            #[serde(deserialize_with = "record::deserialize_to_i64")]
             id: i64,
         }
 
@@ -163,6 +176,8 @@ impl Client {
         domain: &domain::Name,
         id: i64,
         content: &Content,
+        ttl: Option<i64>,
+        prio: Option<i64>,
     ) -> Result<(), ApiError> {
         let (prefix, root) = split_domain(domain)?;
         let url = self
@@ -180,6 +195,12 @@ impl Client {
         if let Some(prefix) = prefix {
             payload["name"] = serde_json::Value::from(prefix);
         }
+        if let Some(ttl) = ttl {
+            payload["ttl"] = serde_json::Value::from(ttl);
+        }
+        if let Some(prio) = prio {
+            payload["prio"] = serde_json::Value::from(prio);
+        }
 
         self.client
             .post(url)
@@ -194,6 +215,8 @@ impl Client {
         &self,
         domain: &domain::Name,
         content: &Content,
+        ttl: Option<i64>,
+        prio: Option<i64>,
     ) -> Result<(), ApiError> {
         let (prefix, root) = split_domain(domain)?;
         let url = self
@@ -203,11 +226,17 @@ impl Client {
             .join(&format!("{}/", content.type_as_str()))?
             .join(prefix.unwrap_or(""))?;
 
-        let payload = json!({
+        let mut payload = json!({
             "secretapikey": self.secretapikey,
             "apikey": self.apikey,
             "content": content.value_to_string(),
         });
+        if let Some(ttl) = ttl {
+            payload["ttl"] = serde_json::Value::from(ttl);
+        }
+        if let Some(prio) = prio {
+            payload["prio"] = serde_json::Value::from(prio);
+        }
 
         self.client
             .post(url)
